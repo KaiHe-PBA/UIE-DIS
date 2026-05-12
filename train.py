@@ -1,0 +1,202 @@
+import argparse
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+
+from uie_student.datasets import PairedUnderwaterDataset
+from uie_student.losses import StudentLoss, StudentLossConfig
+from uie_student.models.student import UWCNAFConsistencyStudent
+from uie_student.utils import AverageMeter, ensure_dir, load_yaml, set_seed
+
+
+def sigma_schedule(t: torch.Tensor, sigma_min: float = 0.002, sigma_max: float = 0.5) -> torch.Tensor:
+    return sigma_min * (sigma_max / sigma_min) ** t
+
+
+def sample_t(batch_size: int, device: torch.device, bias_to_zero_pow: float = 2.0, force_zero_prob: float = 0.1) -> torch.Tensor:
+    t = torch.rand(batch_size, device=device) ** bias_to_zero_pow
+    if force_zero_prob > 0:
+        mask = torch.rand(batch_size, device=device) < force_zero_prob
+        t = torch.where(mask, torch.zeros_like(t), t)
+    return t
+
+
+def make_xt(
+    y: torch.Tensor,
+    x_gt: torch.Tensor,
+    t: torch.Tensor,
+    p_center_y: float = 0.6,
+    sigma_min: float = 0.002,
+    sigma_max: float = 0.5,
+) -> torch.Tensor:
+    b = y.shape[0]
+    eps = torch.randn_like(y)
+    sigma = sigma_schedule(t, sigma_min=sigma_min, sigma_max=sigma_max).view(b, 1, 1, 1)
+    use_y = (torch.rand(b, device=y.device) < p_center_y).view(b, 1, 1, 1)
+    center = torch.where(use_y, y, x_gt)
+    return center + sigma * eps
+
+
+def build_dataloaders(cfg):
+    train_set = PairedUnderwaterDataset(
+        data_root=cfg['data']['root'],
+        split='train',
+        patch_size=cfg['data']['patch_size'],
+        augment=True,
+    )
+    val_set = PairedUnderwaterDataset(
+        data_root=cfg['data']['root'],
+        split='val',
+        patch_size=cfg['data']['patch_size'],
+        augment=False,
+    )
+    train_loader = DataLoader(
+        train_set,
+        batch_size=cfg['train']['batch_size'],
+        shuffle=True,
+        num_workers=cfg['train']['num_workers'],
+        pin_memory=True,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=1,
+        shuffle=False,
+        num_workers=cfg['train']['num_workers'],
+        pin_memory=True,
+    )
+    return train_loader, val_loader
+
+
+def build_model(cfg):
+    return UWCNAFConsistencyStudent(
+        base_dim=cfg['model']['base_dim'],
+        enc_blocks=tuple(cfg['model']['enc_blocks']),
+        dec_blocks=tuple(cfg['model']['dec_blocks']),
+        time_emb_dim=cfg['model']['time_emb_dim'],
+        time_mlp_dim=cfg['model']['time_mlp_dim'],
+        use_residual_head=cfg['model']['use_residual_head'],
+        use_gate_in_film=cfg['model']['use_gate_in_film'],
+    )
+
+
+def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, epoch):
+    model.train()
+    meter = AverageMeter()
+    log_interval = cfg['train']['log_interval']
+    use_self_cons = epoch >= cfg['train']['self_consistency_start_epoch']
+
+    for step, batch in enumerate(loader, start=1):
+        y = batch['y'].to(device, non_blocking=True)
+        x_gt = batch['x_gt'].to(device, non_blocking=True)
+        b = y.shape[0]
+
+        t1 = sample_t(b, device, cfg['train']['t_bias_pow'], cfg['train']['force_zero_prob'])
+        x_t1 = make_xt(y, x_gt, t1, cfg['train']['p_center_y'], cfg['train']['sigma_min'], cfg['train']['sigma_max'])
+
+        optimizer.zero_grad(set_to_none=True)
+        with torch.cuda.amp.autocast(enabled=scaler is not None):
+            out1 = model(x_t1, y, t1, return_residual=True)
+            losses = criterion(out1, x_gt)
+            total = losses['loss_total']
+
+            if use_self_cons and cfg['train']['w_self_consistency'] > 0:
+                t2 = sample_t(b, device, cfg['train']['t_bias_pow'], 0.0)
+                x_t2 = make_xt(y, x_gt, t2, cfg['train']['p_center_y'], cfg['train']['sigma_min'], cfg['train']['sigma_max'])
+                out2 = model(x_t2, y, t2, return_residual=False)
+                pred1 = out1.get('x0_from_residual', out1['x0'])
+                pred2 = out2.get('x0_from_residual', out2['x0'])
+                loss_cons = F.mse_loss(pred1, pred2.detach())
+                losses['loss_self_consistency'] = loss_cons
+                total = total + cfg['train']['w_self_consistency'] * loss_cons
+
+        if scaler is not None:
+            scaler.scale(total).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train']['grad_clip'])
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train']['grad_clip'])
+            optimizer.step()
+
+        meter.update(float(total.detach().cpu()), b)
+
+        if step % log_interval == 0:
+            msg = f"epoch={epoch} step={step}/{len(loader)} loss={meter.avg:.6f}"
+            if 'loss_self_consistency' in losses:
+                msg += f" cons={float(losses['loss_self_consistency'].detach().cpu()):.6f}"
+            print(msg)
+
+    return meter.avg
+
+
+@torch.no_grad()
+def validate(model, loader, criterion, device):
+    model.eval()
+    meter = AverageMeter()
+    for batch in loader:
+        y = batch['y'].to(device, non_blocking=True)
+        x_gt = batch['x_gt'].to(device, non_blocking=True)
+        t = torch.zeros(y.shape[0], device=device)
+        out = model(y, y, t, return_residual=True)
+        losses = criterion(out, x_gt)
+        meter.update(float(losses['loss_total'].detach().cpu()), y.shape[0])
+    return meter.avg
+
+
+def save_checkpoint(model, optimizer, epoch, best_val, cfg, tag):
+    save_dir = Path(cfg['train']['save_dir'])
+    ensure_dir(str(save_dir))
+    ckpt = {
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'best_val': best_val,
+        'config': cfg,
+    }
+    torch.save(ckpt, save_dir / f'{tag}.pth')
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_student.yaml')
+    args = parser.parse_args()
+
+    cfg = load_yaml(args.config)
+    set_seed(cfg['train']['seed'])
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    train_loader, val_loader = build_dataloaders(cfg)
+    model = build_model(cfg).to(device)
+    optimizer = AdamW(model.parameters(), lr=cfg['train']['lr'], weight_decay=cfg['train']['weight_decay'])
+    scaler = torch.cuda.amp.GradScaler(enabled=cfg['train']['amp'] and device.type == 'cuda')
+    scaler = scaler if scaler.is_enabled() else None
+
+    criterion = StudentLoss(StudentLossConfig(
+        w_recon=cfg['loss']['w_recon'],
+        w_ssim=cfg['loss']['w_ssim'],
+        w_color=cfg['loss']['w_color'],
+        w_edge=cfg['loss']['w_edge'],
+        w_freq=cfg['loss']['w_freq'],
+        use_charbonnier=cfg['loss']['use_charbonnier'],
+    )).to(device)
+
+    best_val = float('inf')
+    for epoch in range(1, cfg['train']['epochs'] + 1):
+        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, scaler, device, cfg, epoch)
+        val_loss = validate(model, val_loader, criterion, device)
+        print(f'epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}')
+
+        save_checkpoint(model, optimizer, epoch, best_val, cfg, 'latest')
+        if val_loss < best_val:
+            best_val = val_loss
+            save_checkpoint(model, optimizer, epoch, best_val, cfg, 'best')
+
+
+if __name__ == '__main__':
+    main()
