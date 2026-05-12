@@ -34,6 +34,7 @@ class PairedUnderwaterDataset(Dataset):
         split: str = 'train',
         patch_size: int = 256,
         augment: bool = True,
+        center_crop_eval: bool = False,
     ):
         self.data_root = Path(data_root)
         self.input_dir = self.data_root / split / 'input'
@@ -55,6 +56,7 @@ class PairedUnderwaterDataset(Dataset):
 
         self.patch_size = patch_size
         self.augment = augment and split == 'train'
+        self.center_crop_eval = center_crop_eval
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -98,7 +100,7 @@ class PairedUnderwaterDataset(Dataset):
         if self.augment:
             y, x_gt = self._paired_random_crop(y, x_gt)
             y, x_gt = self._paired_aug(y, x_gt)
-        else:
+        elif self.center_crop_eval:
             y = TF.center_crop(y, [min(y.height, self.patch_size), min(y.width, self.patch_size)])
             x_gt = TF.center_crop(x_gt, [min(x_gt.height, self.patch_size), min(x_gt.width, self.patch_size)])
         y = TF.to_tensor(y)

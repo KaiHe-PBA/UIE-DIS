@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 
 from uie_student.datasets import PairedUnderwaterDataset
 from uie_student.losses import StudentLoss, StudentLossConfig
+from uie_student.metrics import calc_batch_metrics
 from uie_student.models.student import UWCNAFConsistencyStudent
 from uie_student.utils import AverageMeter, ensure_dir, load_yaml, set_seed
 
@@ -52,6 +53,7 @@ def build_dataloaders(cfg):
         split='val',
         patch_size=cfg['data']['patch_size'],
         augment=False,
+        center_crop_eval=cfg['data'].get('center_crop_eval', False),
     )
     train_loader = DataLoader(
         train_set,
@@ -138,15 +140,26 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
 @torch.no_grad()
 def validate(model, loader, criterion, device):
     model.eval()
-    meter = AverageMeter()
+    loss_meter = AverageMeter()
+    psnr_meter = AverageMeter()
+    ssim_meter = AverageMeter()
     for batch in loader:
         y = batch['y'].to(device, non_blocking=True)
         x_gt = batch['x_gt'].to(device, non_blocking=True)
         t = torch.zeros(y.shape[0], device=device)
         out = model(y, y, t, return_residual=True)
-        losses = criterion(out, x_gt)
-        meter.update(float(losses['loss_total'].detach().cpu()), y.shape[0])
-    return meter.avg
+        pred = out.get('x0_from_residual', out['x0']).clamp(0.0, 1.0)
+        losses = criterion({'x0': pred}, x_gt)
+        metrics = calc_batch_metrics(pred, x_gt)
+        batch_size = y.shape[0]
+        loss_meter.update(float(losses['loss_total'].detach().cpu()), batch_size)
+        psnr_meter.update(float(metrics['psnr'].mean().detach().cpu()), batch_size)
+        ssim_meter.update(float(metrics['ssim'].mean().detach().cpu()), batch_size)
+    return {
+        'loss': loss_meter.avg,
+        'psnr': psnr_meter.avg,
+        'ssim': ssim_meter.avg,
+    }
 
 
 def save_checkpoint(model, optimizer, epoch, best_val, cfg, tag):
@@ -187,15 +200,28 @@ def main():
     )).to(device)
 
     best_val = float('inf')
+    best_psnr = float('-inf')
+    best_ssim = float('-inf')
     for epoch in range(1, cfg['train']['epochs'] + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, scaler, device, cfg, epoch)
-        val_loss = validate(model, val_loader, criterion, device)
-        print(f'epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}')
+        val_metrics = validate(model, val_loader, criterion, device)
+        print(
+            f"epoch={epoch} train_loss={train_loss:.6f} "
+            f"val_loss={val_metrics['loss']:.6f} "
+            f"val_psnr={val_metrics['psnr']:.4f} "
+            f"val_ssim={val_metrics['ssim']:.4f}"
+        )
 
         save_checkpoint(model, optimizer, epoch, best_val, cfg, 'latest')
-        if val_loss < best_val:
-            best_val = val_loss
+        if val_metrics['loss'] < best_val:
+            best_val = val_metrics['loss']
             save_checkpoint(model, optimizer, epoch, best_val, cfg, 'best')
+        if val_metrics['psnr'] > best_psnr:
+            best_psnr = val_metrics['psnr']
+            save_checkpoint(model, optimizer, epoch, best_psnr, cfg, 'best_psnr')
+        if val_metrics['ssim'] > best_ssim:
+            best_ssim = val_metrics['ssim']
+            save_checkpoint(model, optimizer, epoch, best_ssim, cfg, 'best_ssim')
 
 
 if __name__ == '__main__':

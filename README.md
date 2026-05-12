@@ -23,20 +23,37 @@ pip install -r requirements.txt
 python train.py --config configs/train_student.yaml
 ```
 
+训练日志会输出：
+- `train_loss`
+- `val_loss`
+- `val_psnr`
+- `val_ssim`
+
+训练过程中会保存：
+- `latest.pth`
+- `best.pth`（按 `val_loss`）
+- `best_psnr.pth`
+- `best_ssim.pth`
+
+验证阶段默认保留原图分辨率计算指标；如需中心裁剪验证，可在 `configs/train_student.yaml` 里设置 `data.center_crop_eval: true`。
+
 ## 一步推理
 
-```python
-import torch
-from uie_student.models.student import UWCNAFConsistencyStudent
+单图或目录推理：
 
-ckpt = torch.load('checkpoints/student/best.pth', map_location='cpu')
-model = UWCNAFConsistencyStudent()
-model.load_state_dict(ckpt['model'])
-model.eval()
+```bash
+python infer.py \
+  --checkpoint checkpoints/student/best.pth \
+  --input data/paired_uie/val/input \
+  --output results/val_pred
+```
 
-y = torch.rand(1, 3, 256, 256)
-t = torch.zeros(1)
-with torch.no_grad():
-    out = model(y, y, t, return_residual=True)
-    pred = out.get('x0_from_residual', out['x0']).clamp(0, 1)
+如果同时提供 GT 目录，会额外统计平均 `PSNR/SSIM`：
+
+```bash
+python infer.py \
+  --checkpoint checkpoints/student/best.pth \
+  --input data/paired_uie/val/input \
+  --target data/paired_uie/val/target \
+  --output results/val_pred
 ```

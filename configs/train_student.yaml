@@ -1,6 +1,7 @@
 data:
   root: ./data/paired_uie
   patch_size: 256
+  center_crop_eval: false
 
 model:
   base_dim: 32
