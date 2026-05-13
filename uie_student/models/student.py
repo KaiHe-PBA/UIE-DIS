@@ -229,12 +229,15 @@ class UWCNAFConsistencyStudent(nn.Module):
         self.use_residual_head = use_residual_head
         if use_residual_head:
             self.res_conv = nn.Conv2d(dims[0], out_ch, 3, 1, 1)
+            self.res_scale = nn.Parameter(torch.tensor(0.1))
+        else:
+            self.out_scale = nn.Parameter(torch.tensor(0.1))
 
-        # Start from an identity-like restoration target: x0 ~= y.
-        nn.init.zeros_(self.out_conv.weight)
+        # Small but non-zero init keeps identity prior while allowing backbone gradients from step 1.
+        nn.init.normal_(self.out_conv.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.out_conv.bias)
         if use_residual_head:
-            nn.init.zeros_(self.res_conv.weight)
+            nn.init.normal_(self.res_conv.weight, mean=0.0, std=1e-3)
             nn.init.zeros_(self.res_conv.bias)
 
     def forward(self, x_t: torch.Tensor, y: torch.Tensor, t: torch.Tensor, return_residual: bool = False) -> Dict[str, torch.Tensor]:
@@ -264,11 +267,15 @@ class UWCNAFConsistencyStudent(nn.Module):
             x = self.dec_inject[di](x, cond_feats[-2 - di], temb)
 
         x = self.out_norm(x)
-        x0 = y + self.out_conv(x)
-        out = {'x0': x0}
         if self.use_residual_head or return_residual:
-            residual = self.res_conv(x) if self.use_residual_head else x0 - y
+            residual = self.res_scale * self.res_conv(x) if self.use_residual_head else self.out_conv(x)
+            x0 = y + residual
+            out = {'x0': x0}
             out['residual'] = residual
             if self.use_residual_head:
-                out['x0_from_residual'] = y + residual
+                out['x0_from_residual'] = x0
+            return out
+
+        x0 = y + self.out_scale * self.out_conv(x)
+        out = {'x0': x0}
         return out

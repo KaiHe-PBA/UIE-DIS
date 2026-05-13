@@ -15,9 +15,9 @@ model:
 loss:
   w_recon: 1.0
   w_ssim: 0.2
-  w_color: 0.1
-  w_edge: 0.05
-  w_freq: 0.05
+  w_color: 0.05
+  w_edge: 0.0
+  w_freq: 0.0
   use_charbonnier: true
 
 train:
@@ -32,12 +32,13 @@ train:
   log_interval: 20
   save_dir: ./checkpoints/student
 
-  warmup_epochs: 5
+  warmup_epochs: 15
+  noise_ramp_epochs: 20
   sigma_min: 0.002
   sigma_max: 0.15
-  p_center_y: 0.8
+  p_center_y: 1.0
   t_bias_pow: 2.0
   force_zero_prob: 0.2
 
-  self_consistency_start_epoch: 40
-  w_self_consistency: 0.1
+  self_consistency_start_epoch: 80
+  w_self_consistency: 0.05

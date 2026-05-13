@@ -41,6 +41,18 @@ def make_xt(
     return center + sigma * eps
 
 
+def get_epoch_sigma_max(epoch: int, cfg) -> float:
+    warmup_epochs = cfg['train'].get('warmup_epochs', 0)
+    noise_ramp_epochs = cfg['train'].get('noise_ramp_epochs', 0)
+    target_sigma_max = cfg['train']['sigma_max']
+    if epoch <= warmup_epochs:
+        return 0.0
+    if noise_ramp_epochs <= 0:
+        return target_sigma_max
+    progress = min(max(epoch - warmup_epochs, 0), noise_ramp_epochs) / float(noise_ramp_epochs)
+    return target_sigma_max * progress
+
+
 def build_dataloaders(cfg):
     train_set = PairedUnderwaterDataset(
         data_root=cfg['data']['root'],
@@ -90,6 +102,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
     meter = AverageMeter()
     log_interval = cfg['train']['log_interval']
     use_self_cons = epoch >= cfg['train']['self_consistency_start_epoch']
+    epoch_sigma_max = get_epoch_sigma_max(epoch, cfg)
 
     for step, batch in enumerate(loader, start=1):
         y = batch['y'].to(device, non_blocking=True)
@@ -98,12 +111,12 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
 
         warmup_epochs = cfg['train'].get('warmup_epochs', 0)
         in_warmup = epoch <= warmup_epochs
-        if in_warmup:
+        if in_warmup or epoch_sigma_max <= 0:
             t1 = torch.zeros(b, device=device)
             x_t1 = y
         else:
             t1 = sample_t(b, device, cfg['train']['t_bias_pow'], cfg['train']['force_zero_prob'])
-            x_t1 = make_xt(y, x_gt, t1, cfg['train']['p_center_y'], cfg['train']['sigma_min'], cfg['train']['sigma_max'])
+            x_t1 = make_xt(y, x_gt, t1, cfg['train']['p_center_y'], cfg['train']['sigma_min'], epoch_sigma_max)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=scaler is not None):
@@ -111,9 +124,9 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
             losses = criterion(out1, x_gt)
             total = losses['loss_total']
 
-            if (not in_warmup) and use_self_cons and cfg['train']['w_self_consistency'] > 0:
+            if (not in_warmup) and epoch_sigma_max > 0 and use_self_cons and cfg['train']['w_self_consistency'] > 0:
                 t2 = sample_t(b, device, cfg['train']['t_bias_pow'], 0.0)
-                x_t2 = make_xt(y, x_gt, t2, cfg['train']['p_center_y'], cfg['train']['sigma_min'], cfg['train']['sigma_max'])
+                x_t2 = make_xt(y, x_gt, t2, cfg['train']['p_center_y'], cfg['train']['sigma_min'], epoch_sigma_max)
                 out2 = model(x_t2, y, t2, return_residual=False)
                 pred1 = out1.get('x0_from_residual', out1['x0'])
                 pred2 = out2.get('x0_from_residual', out2['x0'])
@@ -138,6 +151,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
             msg = f"epoch={epoch} step={step}/{len(loader)} loss={meter.avg:.6f}"
             if 'loss_self_consistency' in losses:
                 msg += f" cons={float(losses['loss_self_consistency'].detach().cpu()):.6f}"
+            msg += f" sigma_max={epoch_sigma_max:.4f}"
             pred_stats = out1.get('x0_from_residual', out1['x0']).detach()
             msg += (
                 f" pred_mean={float(pred_stats.mean().cpu()):.4f}"
@@ -229,7 +243,8 @@ def main():
             f"val_psnr={val_metrics['psnr']:.4f} "
             f"val_ssim={val_metrics['ssim']:.4f} "
             f"input_psnr={val_metrics['input_psnr']:.4f} "
-            f"input_ssim={val_metrics['input_ssim']:.4f}"
+            f"input_ssim={val_metrics['input_ssim']:.4f} "
+            f"sigma_max={get_epoch_sigma_max(epoch, cfg):.4f}"
         )
 
         save_checkpoint(model, optimizer, epoch, best_val, cfg, 'latest')
