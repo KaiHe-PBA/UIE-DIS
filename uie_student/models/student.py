@@ -72,6 +72,8 @@ class NAFBlock(nn.Module):
         self.ffn_pw2 = nn.Conv2d(ffn_hidden, dim, 1, 1, 0)
         self.drop2 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.gamma = nn.Parameter(torch.zeros(1, dim, 1, 1))
+        nn.init.constant_(self.beta, 1e-2)
+        nn.init.constant_(self.gamma, 1e-2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.norm1(x)
@@ -228,6 +230,13 @@ class UWCNAFConsistencyStudent(nn.Module):
         if use_residual_head:
             self.res_conv = nn.Conv2d(dims[0], out_ch, 3, 1, 1)
 
+        # Start from an identity-like restoration target: x0 ~= y.
+        nn.init.zeros_(self.out_conv.weight)
+        nn.init.zeros_(self.out_conv.bias)
+        if use_residual_head:
+            nn.init.zeros_(self.res_conv.weight)
+            nn.init.zeros_(self.res_conv.bias)
+
     def forward(self, x_t: torch.Tensor, y: torch.Tensor, t: torch.Tensor, return_residual: bool = False) -> Dict[str, torch.Tensor]:
         temb = self.time_mlp(sinusoidal_time_embedding(t, self.time_dim))
         cond_feats = self.cond_encoder(y)
@@ -255,7 +264,7 @@ class UWCNAFConsistencyStudent(nn.Module):
             x = self.dec_inject[di](x, cond_feats[-2 - di], temb)
 
         x = self.out_norm(x)
-        x0 = self.out_conv(x)
+        x0 = y + self.out_conv(x)
         out = {'x0': x0}
         if self.use_residual_head or return_residual:
             residual = self.res_conv(x) if self.use_residual_head else x0 - y

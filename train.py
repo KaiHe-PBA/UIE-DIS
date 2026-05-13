@@ -96,8 +96,14 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
         x_gt = batch['x_gt'].to(device, non_blocking=True)
         b = y.shape[0]
 
-        t1 = sample_t(b, device, cfg['train']['t_bias_pow'], cfg['train']['force_zero_prob'])
-        x_t1 = make_xt(y, x_gt, t1, cfg['train']['p_center_y'], cfg['train']['sigma_min'], cfg['train']['sigma_max'])
+        warmup_epochs = cfg['train'].get('warmup_epochs', 0)
+        in_warmup = epoch <= warmup_epochs
+        if in_warmup:
+            t1 = torch.zeros(b, device=device)
+            x_t1 = y
+        else:
+            t1 = sample_t(b, device, cfg['train']['t_bias_pow'], cfg['train']['force_zero_prob'])
+            x_t1 = make_xt(y, x_gt, t1, cfg['train']['p_center_y'], cfg['train']['sigma_min'], cfg['train']['sigma_max'])
 
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=scaler is not None):
@@ -105,7 +111,7 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
             losses = criterion(out1, x_gt)
             total = losses['loss_total']
 
-            if use_self_cons and cfg['train']['w_self_consistency'] > 0:
+            if (not in_warmup) and use_self_cons and cfg['train']['w_self_consistency'] > 0:
                 t2 = sample_t(b, device, cfg['train']['t_bias_pow'], 0.0)
                 x_t2 = make_xt(y, x_gt, t2, cfg['train']['p_center_y'], cfg['train']['sigma_min'], cfg['train']['sigma_max'])
                 out2 = model(x_t2, y, t2, return_residual=False)
@@ -132,6 +138,11 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
             msg = f"epoch={epoch} step={step}/{len(loader)} loss={meter.avg:.6f}"
             if 'loss_self_consistency' in losses:
                 msg += f" cons={float(losses['loss_self_consistency'].detach().cpu()):.6f}"
+            pred_stats = out1.get('x0_from_residual', out1['x0']).detach()
+            msg += (
+                f" pred_mean={float(pred_stats.mean().cpu()):.4f}"
+                f" gt_mean={float(x_gt.mean().detach().cpu()):.4f}"
+            )
             print(msg)
 
     return meter.avg
@@ -143,6 +154,8 @@ def validate(model, loader, criterion, device):
     loss_meter = AverageMeter()
     psnr_meter = AverageMeter()
     ssim_meter = AverageMeter()
+    input_psnr_meter = AverageMeter()
+    input_ssim_meter = AverageMeter()
     for batch in loader:
         y = batch['y'].to(device, non_blocking=True)
         x_gt = batch['x_gt'].to(device, non_blocking=True)
@@ -151,14 +164,19 @@ def validate(model, loader, criterion, device):
         pred = out.get('x0_from_residual', out['x0']).clamp(0.0, 1.0)
         losses = criterion({'x0': pred}, x_gt)
         metrics = calc_batch_metrics(pred, x_gt)
+        input_metrics = calc_batch_metrics(y, x_gt)
         batch_size = y.shape[0]
         loss_meter.update(float(losses['loss_total'].detach().cpu()), batch_size)
         psnr_meter.update(float(metrics['psnr'].mean().detach().cpu()), batch_size)
         ssim_meter.update(float(metrics['ssim'].mean().detach().cpu()), batch_size)
+        input_psnr_meter.update(float(input_metrics['psnr'].mean().detach().cpu()), batch_size)
+        input_ssim_meter.update(float(input_metrics['ssim'].mean().detach().cpu()), batch_size)
     return {
         'loss': loss_meter.avg,
         'psnr': psnr_meter.avg,
         'ssim': ssim_meter.avg,
+        'input_psnr': input_psnr_meter.avg,
+        'input_ssim': input_ssim_meter.avg,
     }
 
 
@@ -209,7 +227,9 @@ def main():
             f"epoch={epoch} train_loss={train_loss:.6f} "
             f"val_loss={val_metrics['loss']:.6f} "
             f"val_psnr={val_metrics['psnr']:.4f} "
-            f"val_ssim={val_metrics['ssim']:.4f}"
+            f"val_ssim={val_metrics['ssim']:.4f} "
+            f"input_psnr={val_metrics['input_psnr']:.4f} "
+            f"input_ssim={val_metrics['input_ssim']:.4f}"
         )
 
         save_checkpoint(model, optimizer, epoch, best_val, cfg, 'latest')

@@ -32,11 +32,12 @@ train:
   log_interval: 20
   save_dir: ./checkpoints/student
 
+  warmup_epochs: 5
   sigma_min: 0.002
-  sigma_max: 0.5
-  p_center_y: 0.6
+  sigma_max: 0.15
+  p_center_y: 0.8
   t_bias_pow: 2.0
-  force_zero_prob: 0.1
+  force_zero_prob: 0.2
 
-  self_consistency_start_epoch: 20
-  w_self_consistency: 0.2
+  self_consistency_start_epoch: 40
+  w_self_consistency: 0.1
