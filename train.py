@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from uie_student.datasets import PairedUnderwaterDataset
@@ -95,6 +96,20 @@ def build_model(cfg):
         use_residual_head=cfg['model']['use_residual_head'],
         use_gate_in_film=cfg['model']['use_gate_in_film'],
     )
+
+
+def build_scheduler(optimizer, cfg):
+    sched_cfg = cfg['train'].get('scheduler', {})
+    if not sched_cfg.get('enabled', False):
+        return None
+    sched_type = sched_cfg.get('type', 'cosine')
+    if sched_type == 'cosine':
+        return CosineAnnealingLR(
+            optimizer,
+            T_max=cfg['train']['epochs'],
+            eta_min=sched_cfg.get('min_lr', 1e-6),
+        )
+    raise ValueError(f"Unsupported scheduler type: {sched_type}")
 
 
 def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, epoch):
@@ -219,6 +234,7 @@ def main():
     train_loader, val_loader = build_dataloaders(cfg)
     model = build_model(cfg).to(device)
     optimizer = AdamW(model.parameters(), lr=cfg['train']['lr'], weight_decay=cfg['train']['weight_decay'])
+    scheduler = build_scheduler(optimizer, cfg)
     scaler = torch.cuda.amp.GradScaler(enabled=cfg['train']['amp'] and device.type == 'cuda')
     scaler = scaler if scaler.is_enabled() else None
 
@@ -244,8 +260,12 @@ def main():
             f"val_ssim={val_metrics['ssim']:.4f} "
             f"input_psnr={val_metrics['input_psnr']:.4f} "
             f"input_ssim={val_metrics['input_ssim']:.4f} "
+            f"lr={optimizer.param_groups[0]['lr']:.6e} "
             f"sigma_max={get_epoch_sigma_max(epoch, cfg):.4f}"
         )
+
+        if scheduler is not None:
+            scheduler.step()
 
         save_checkpoint(model, optimizer, epoch, best_val, cfg, 'latest')
         if val_metrics['loss'] < best_val:

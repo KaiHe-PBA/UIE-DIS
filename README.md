@@ -23,6 +23,14 @@ pip install -r requirements.txt
 python train.py --config configs/train_student.yaml
 ```
 
+推荐先跑纯监督 baseline：
+
+```bash
+python train.py --config configs/train_supervised_baseline.yaml
+```
+
+当纯监督训练已经稳定超过输入基线后，再尝试 `configs/train_student.yaml` 这种带噪声/自一致的版本。
+
 训练日志会输出：
 - `train_loss`
 - `val_loss`
