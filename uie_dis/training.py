@@ -333,6 +333,20 @@ def tensor_to_device(batch: Mapping[str, Any], device: torch.device) -> dict[str
     return output
 
 
+def cast_tensor_tree_to_float(data: Any) -> Any:
+    if torch.is_tensor(data):
+        if torch.is_floating_point(data):
+            return data.float()
+        return data
+    if isinstance(data, dict):
+        return {key: cast_tensor_tree_to_float(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [cast_tensor_tree_to_float(value) for value in data]
+    if isinstance(data, tuple):
+        return tuple(cast_tensor_tree_to_float(value) for value in data)
+    return data
+
+
 def train_one_epoch(
     *,
     epoch: int,
@@ -384,15 +398,17 @@ def train_one_epoch(
 
         with maybe_autocast(device, config.amp):
             student_output = student(x_t, y, t)
-            loss_terms = loss_assembler(
-                student_output,
-                target_x0=target_x0,
-                teacher_output=teacher_output,
-                x_t=x_t,
-                y=y,
-                t=t,
-            )
-            total_loss = loss_terms["total"]
+
+        # Keep model forward under AMP, but compute restoration losses in FP32 for stability.
+        loss_terms = loss_assembler(
+            cast_tensor_tree_to_float(student_output),
+            target_x0=target_x0.float(),
+            teacher_output=cast_tensor_tree_to_float(teacher_output) if teacher_output is not None else None,
+            x_t=x_t.float(),
+            y=y.float(),
+            t=t.float(),
+        )
+        total_loss = loss_terms["total"]
 
         if not torch.isfinite(total_loss):
             skipped_batches += 1
@@ -411,6 +427,7 @@ def train_one_epoch(
         if grad_norm is not None and not torch.isfinite(grad_norm):
             skipped_batches += 1
             optimizer.zero_grad(set_to_none=True)
+            scaler.update()
             print(
                 f"[Warn] epoch={epoch} step={batch_index}/{len(dataloader)} "
                 "non-finite gradient norm detected, skipping optimizer step."
