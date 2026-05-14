@@ -232,6 +232,8 @@ class DecoderStage(nn.Module):
         self.block = TimeConditionedResidualBlock(channels, time_dim)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
+        if x.shape[-2:] != skip.shape[-2:]:
+            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
         x = self.merge(torch.cat([x, skip], dim=1))
         return self.block(x, time_emb)
 
@@ -294,6 +296,23 @@ class LightConsistencyStudent(nn.Module):
             nn.Conv2d(channels[0], out_channels, kernel_size=3, padding=1),
         )
         self.color_head = ColorCorrectionHead(channels[0], channels[0])
+        self.size_multiple = 2 ** (len(channels) - 1)
+
+    def _pad_to_multiple(self, tensor: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
+        _, _, height, width = tensor.shape
+        target_height = math.ceil(height / self.size_multiple) * self.size_multiple
+        target_width = math.ceil(width / self.size_multiple) * self.size_multiple
+        pad_h = target_height - height
+        pad_w = target_width - width
+        if pad_h == 0 and pad_w == 0:
+            return tensor, (height, width)
+        pad_mode = "reflect" if height > 1 and width > 1 else "replicate"
+        padded = F.pad(tensor, (0, pad_w, 0, pad_h), mode=pad_mode)
+        return padded, (height, width)
+
+    def _crop_to_size(self, tensor: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+        height, width = size
+        return tensor[:, :, :height, :width]
 
     def _format_timestep(self, t: Union[int, float, torch.Tensor], batch_size: int, device: torch.device) -> torch.Tensor:
         if not torch.is_tensor(t):
@@ -316,6 +335,8 @@ class LightConsistencyStudent(nn.Module):
         if xt.shape != y.shape:
             raise ValueError(f"xt and y must share shape, got {xt.shape} and {y.shape}")
 
+        xt, original_size = self._pad_to_multiple(xt)
+        y, _ = self._pad_to_multiple(y)
         batch_size = xt.shape[0]
         timesteps = self._format_timestep(t, batch_size=batch_size, device=xt.device)
         time_emb = self.time_mlp(self.time_embed(timesteps))
@@ -347,6 +368,8 @@ class LightConsistencyStudent(nn.Module):
         else:
             x0 = residual
         x0 = self.color_head(x, cond_features[0], x0)
+        residual = self._crop_to_size(residual, original_size)
+        x0 = self._crop_to_size(x0, original_size)
 
         if self.clamp_output:
             x0 = torch.clamp(x0, 0.0, 1.0)

@@ -8,8 +8,8 @@ from tqdm import tqdm
 from utils import (
     build_model,
     call_model,
-    compute_batch_metrics,
     dump_json,
+    evaluate_image_pair,
     extract_prediction,
     load_checkpoint,
     load_image_tensor,
@@ -86,7 +86,12 @@ def main() -> None:
                 target_path = Path(args.target_dir) / image_path.name
                 if target_path.exists():
                     target = load_image_tensor(str(target_path), args.image_size).unsqueeze(0).to(device)
-                    metrics = compute_batch_metrics(pred, target)
+                    min_height = min(pred.shape[-2], target.shape[-2])
+                    min_width = min(pred.shape[-1], target.shape[-1])
+                    metrics = evaluate_image_pair(
+                        pred[0, :, :min_height, :min_width],
+                        target[0, :, :min_height, :min_width],
+                    )
                     metrics['file'] = image_path.name
                     all_metrics.append(metrics)
 
