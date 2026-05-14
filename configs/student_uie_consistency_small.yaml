@@ -1,0 +1,47 @@
+model:
+  name: light_consistency_student
+  in_channels: 3
+  cond_in_channels: 3
+  out_channels: 3
+  base_channels: 32
+  channel_multipliers: [1, 2, 4]
+  time_embed_dim: 128
+  use_residual_output: true
+  clamp_output: true
+
+runtime:
+  image_size: 256
+  mixed_precision: true
+  device: cuda
+
+inference:
+  one_step_t: 1.0
+  multi_step_schedule: [1.0, 0.5, 0.0]
+  clamp_output: true
+
+training:
+  batch_size: 8
+  num_workers: 4
+  total_steps: 300000
+  lr: 0.0002
+  weight_decay: 0.00001
+  ema_decay: 0.999
+  grad_clip_norm: 1.0
+
+losses:
+  consistency:
+    enabled: true
+    weight: 1.0
+  reconstruction:
+    type: charbonnier
+    weight: 1.0
+    eps: 0.001
+  structure:
+    type: ssim
+    weight: 0.2
+  color:
+    enabled: true
+    weight: 0.05
+  perceptual:
+    enabled: false
+    weight: 0.1
