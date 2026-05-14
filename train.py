@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
-from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from tqdm import tqdm
 
@@ -89,10 +88,11 @@ def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    amp_enabled = args.amp and device.type == 'cuda'
 
     model = build_model(args.model_spec, parse_json_argument(args.model_kwargs_json)).to(device)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = GradScaler(enabled=args.amp and device.type == 'cuda')
+    scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
     criterion = MultiTermLoss(
         consistency_weight=args.consistency_weight,
         reconstruction_weight=args.reconstruction_weight,
@@ -103,7 +103,7 @@ def main() -> None:
         perceptual_weight=args.perceptual_weight,
         reconstruction_mode=args.reconstruction_mode,
         consistency_mode=args.consistency_mode,
-    )
+    ).to(device)
 
     train_dataset = PairedImageDataset(
         input_dir=args.train_input_dir,
@@ -164,7 +164,7 @@ def main() -> None:
             batch = move_batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(enabled=args.amp and device.type == 'cuda'):
+            with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
                 outputs = call_model(model, batch['x_t'], batch['input'], batch['t'], batch=batch)
                 pred, extras = extract_prediction(outputs)
                 pred = pred.clamp(0.0, 1.0)

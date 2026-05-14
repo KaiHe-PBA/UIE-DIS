@@ -97,8 +97,10 @@ class EdgeLoss(nn.Module):
 
     def _gradient_magnitude(self, tensor: torch.Tensor) -> torch.Tensor:
         tensor = tensor.mean(dim=1, keepdim=True)
-        grad_x = F.conv2d(tensor, self.sobel_x, padding=1)
-        grad_y = F.conv2d(tensor, self.sobel_y, padding=1)
+        sobel_x = self.sobel_x.to(device=tensor.device, dtype=tensor.dtype)
+        sobel_y = self.sobel_y.to(device=tensor.device, dtype=tensor.dtype)
+        grad_x = F.conv2d(tensor, sobel_x, padding=1)
+        grad_y = F.conv2d(tensor, sobel_y, padding=1)
         return torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-6)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
