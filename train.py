@@ -13,8 +13,8 @@ from utils import (
     AverageMeter,
     build_model,
     call_model,
-    compute_batch_metrics,
     dump_json,
+    evaluate_image_pair,
     extract_prediction,
     load_checkpoint,
     move_batch_to_device,
@@ -78,9 +78,21 @@ def validate(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device
         outputs = call_model(model, batch['x_t'], batch['input'], batch['t'], batch=batch)
         pred, _ = extract_prediction(outputs)
         pred = pred.clamp(0.0, 1.0)
-        metric_values = compute_batch_metrics(pred, batch['target'])
-        for name, value in metric_values.items():
-            meters[name].update(value, batch['target'].size(0))
+        original_hw = batch.get('original_hw')
+        batch_size = batch['target'].size(0)
+        for idx in range(batch_size):
+            if original_hw is not None:
+                height = int(original_hw[idx, 0].item())
+                width = int(original_hw[idx, 1].item())
+            else:
+                height = batch['target'].shape[-2]
+                width = batch['target'].shape[-1]
+            metric_values = evaluate_image_pair(
+                pred[idx, :, :height, :width],
+                batch['target'][idx, :, :height, :width],
+            )
+            for name, value in metric_values.items():
+                meters[name].update(value, 1)
     return {name: meter.avg for name, meter in meters.items()}
 
 

@@ -1,9 +1,10 @@
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
@@ -92,6 +93,38 @@ def apply_augmentation(
     return tensor.contiguous()
 
 
+def pad_tensor_to_shape(tensor: torch.Tensor, target_height: int, target_width: int) -> torch.Tensor:
+    _, height, width = tensor.shape
+    pad_h = max(target_height - height, 0)
+    pad_w = max(target_width - width, 0)
+    if pad_h == 0 and pad_w == 0:
+        return tensor
+    pad_mode = 'reflect' if height > 1 and width > 1 else 'replicate'
+    return F.pad(tensor, (0, pad_w, 0, pad_h), mode=pad_mode)
+
+
+def flexible_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not batch:
+        raise ValueError('batch 不能为空')
+
+    collated: Dict[str, Any] = {}
+    keys = batch[0].keys()
+    for key in keys:
+        values = [sample[key] for sample in batch]
+        first_value = values[0]
+        if isinstance(first_value, torch.Tensor):
+            if first_value.dim() == 3:
+                max_height = max(value.shape[-2] for value in values)
+                max_width = max(value.shape[-1] for value in values)
+                padded = [pad_tensor_to_shape(value, max_height, max_width) for value in values]
+                collated[key] = torch.stack(padded, dim=0)
+            else:
+                collated[key] = torch.stack(values, dim=0)
+        else:
+            collated[key] = values
+    return collated
+
+
 def sample_time_value(num_steps: int, mode: str = 'uniform') -> Tuple[int, float]:
     if num_steps <= 1:
         return 0, 0.0
@@ -161,6 +194,7 @@ class PairedImageDataset(Dataset):
         input_tensor = image_to_tensor(input_image)
         target_tensor = image_to_tensor(target_image)
         teacher_tensor = self._load_teacher_tensor(input_path)
+        original_hw = torch.tensor([input_tensor.shape[1], input_tensor.shape[2]], dtype=torch.long)
 
         if self.crop_size is not None:
             input_tensor = pad_to_min_size(input_tensor, self.crop_size)
@@ -197,6 +231,7 @@ class PairedImageDataset(Dataset):
             't': torch.tensor(time_value, dtype=torch.float32),
             'step': torch.tensor(step, dtype=torch.long),
             'sigma': torch.tensor(sigma, dtype=torch.float32),
+            'original_hw': original_hw,
         }
         if teacher_tensor is not None:
             sample['teacher_target'] = teacher_tensor
@@ -219,4 +254,5 @@ def build_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=drop_last,
+        collate_fn=flexible_collate_fn,
     )
