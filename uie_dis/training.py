@@ -252,6 +252,7 @@ def create_loss_assembler(config: TrainConfig) -> tuple[UnderwaterLossAssembler,
     assembler = UnderwaterLossAssembler(
         weights=recommended.weights,
         perceptual_backend=recommended.perceptual_backend,
+        clamp_range=config.schedule.clamp_range,
     )
     return assembler, {
         "loss_profile": config.loss_profile,
@@ -336,7 +337,7 @@ def train_one_epoch(
     *,
     epoch: int,
     student: nn.Module,
-    teacher: nn.Module,
+    teacher: Optional[nn.Module],
     dataloader: DataLoader,
     optimizer: AdamW,
     loss_assembler: UnderwaterLossAssembler,
@@ -347,9 +348,11 @@ def train_one_epoch(
     global_step: int,
 ) -> tuple[dict[str, float], int]:
     student.train()
-    teacher.eval()
+    if teacher is not None:
+        teacher.eval()
     total_meter = AverageMeter()
     component_meters: dict[str, AverageMeter] = {}
+    skipped_batches = 0
     start_time = time.time()
 
     for batch_index, batch in enumerate(dataloader, start=1):
@@ -373,9 +376,11 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.no_grad():
-            with maybe_autocast(device, config.amp):
-                teacher_output = teacher(x_t, y, t)
+        teacher_output = None
+        if teacher is not None and loss_assembler.weights.consistency > 0:
+            with torch.no_grad():
+                with maybe_autocast(device, config.amp):
+                    teacher_output = teacher(x_t, y, t)
 
         with maybe_autocast(device, config.amp):
             student_output = student(x_t, y, t)
@@ -389,10 +394,28 @@ def train_one_epoch(
             )
             total_loss = loss_terms["total"]
 
+        if not torch.isfinite(total_loss):
+            skipped_batches += 1
+            optimizer.zero_grad(set_to_none=True)
+            print(
+                f"[Warn] epoch={epoch} step={batch_index}/{len(dataloader)} "
+                "non-finite loss detected, skipping batch."
+            )
+            continue
+
         scaler.scale(total_loss).backward()
         scaler.unscale_(optimizer)
+        grad_norm = None
         if config.grad_clip_norm > 0.0:
-            torch.nn.utils.clip_grad_norm_(student.parameters(), config.grad_clip_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), config.grad_clip_norm)
+        if grad_norm is not None and not torch.isfinite(grad_norm):
+            skipped_batches += 1
+            optimizer.zero_grad(set_to_none=True)
+            print(
+                f"[Warn] epoch={epoch} step={batch_index}/{len(dataloader)} "
+                "non-finite gradient norm detected, skipping optimizer step."
+            )
+            continue
         scaler.step(optimizer)
         scaler.update()
 
@@ -419,6 +442,7 @@ def train_one_epoch(
     summary = {"loss": total_meter.avg}
     for name, meter in component_meters.items():
         summary[name] = meter.avg
+    summary["skipped_batches"] = float(skipped_batches)
     return summary, global_step
 
 

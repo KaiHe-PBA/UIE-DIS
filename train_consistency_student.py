@@ -170,10 +170,11 @@ def main() -> None:
         teacher_use_checkpoint_kwargs=config.teacher_use_checkpoint_kwargs,
     )
     if config.teacher_checkpoint is None:
-        teacher.load_state_dict(student.state_dict(), strict=True)
-        teacher.eval()
-        for parameter in teacher.parameters():
-            parameter.requires_grad_(False)
+        teacher = None
+        print(
+            "[Warn] `--teacher-checkpoint` 未提供，当前训练将关闭 consistency distillation，"
+            "仅使用监督重建损失训练学生模型。"
+        )
     print("Teacher metadata:", teacher_metadata)
 
     optimizer = create_optimizer(student, config)
@@ -182,6 +183,14 @@ def main() -> None:
     ema = ModelEMA(student, decay=config.ema_decay)
     loss_assembler, loss_metadata = create_loss_assembler(config)
     loss_assembler = loss_assembler.to(device)
+    if teacher is None and loss_assembler.weights.consistency > 0:
+        loss_assembler.weights.consistency = 0.0
+        loss_metadata["weights"]["consistency"] = 0.0
+        loss_metadata["enabled_losses"] = tuple(
+            name for name in loss_metadata["enabled_losses"] if name != "consistency"
+        )
+        if "consistency" not in loss_metadata["disabled_losses"]:
+            loss_metadata["disabled_losses"] = tuple(loss_metadata["disabled_losses"]) + ("consistency",)
 
     start_epoch = 1
     global_step = 0
@@ -200,8 +209,6 @@ def main() -> None:
         start_epoch = int(checkpoint["epoch"]) + 1
         global_step = int(checkpoint.get("global_step", 0))
         best_psnr = float(checkpoint.get("best_metric", float("-inf")))
-        if config.teacher_checkpoint is None:
-            teacher.load_state_dict(student.state_dict(), strict=True)
         print(f"Resumed from {config.resume_checkpoint} at epoch {start_epoch}")
 
     write_json(

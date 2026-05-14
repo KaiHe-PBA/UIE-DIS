@@ -42,6 +42,10 @@ def resolve_x0_prediction(output: TensorOrDict, x_t: Optional[Tensor] = None) ->
     raise KeyError("Model output must contain `x0_pred`, or `residual_pred` together with `x_t`.")
 
 
+def clamp_image_prediction(x: Tensor, clamp_range: tuple[float, float] = (0.0, 1.0)) -> Tensor:
+    return x.clamp(*clamp_range)
+
+
 def l1_loss(pred: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
     return _reduce((pred - target).abs(), reduction=reduction)
 
@@ -317,9 +321,11 @@ class UnderwaterLossAssembler(nn.Module):
         perceptual_backend: str = "auto",
         measurement_operator: Optional[Callable[[Tensor], Tensor]] = None,
         degradation_operator: Optional[Callable[[Tensor], Tensor]] = None,
+        clamp_range: tuple[float, float] = (0.0, 1.0),
     ):
         super().__init__()
         self.weights = weights or LossWeights()
+        self.clamp_range = clamp_range
         self.consistency_loss = ConsistencyLoss()
         self.perceptual_loss = PerceptualLoss(backend=perceptual_backend)
         self.color_loss = ColorCorrectionLoss()
@@ -347,12 +353,15 @@ class UnderwaterLossAssembler(nn.Module):
         measurement_operator: Optional[Callable[[Tensor], Tensor]] = None,
         degradation_operator: Optional[Callable[[Tensor], Tensor]] = None,
     ) -> Dict[str, Tensor]:
-        x0_pred = resolve_x0_prediction(output, x_t=x_t)
+        x0_pred_raw = resolve_x0_prediction(output, x_t=x_t)
+        x0_pred = clamp_image_prediction(x0_pred_raw, self.clamp_range)
         total = x0_pred.new_zeros(())
         terms: Dict[str, Tensor] = {}
 
         if teacher_x0 is None and teacher_output is not None:
             teacher_x0 = resolve_x0_prediction(teacher_output, x_t=x_t)
+        if teacher_x0 is not None:
+            teacher_x0 = clamp_image_prediction(teacher_x0, self.clamp_range)
         if teacher_x0 is not None and self.weights.consistency > 0:
             consistency = self.consistency_loss(x0_pred, teacher_x0, output=output, x_t=x_t)
             total = total + self.weights.consistency * consistency
