@@ -1,0 +1,12 @@
+- [x] 学生模型主干采用 Restormer-lite 风格 encoder-decoder，并明确默认复杂度预算
+- [x] 输入接口完整覆盖 `x_t`、`y`、`t`，并说明主输出为 `x_0` 预测
+- [x] `condition encoder` 可从 `y` 提取多尺度条件特征，并与主干各尺度对齐
+- [x] 每个 stage 都明确使用 time embedding，且写清注入位置与方式
+- [x] attention、FFN、skip connection、condition fusion 的位置和顺序已明确
+- [x] 默认输入 256x256 下各 stage 输入输出维度已写清，并可扩展到更高分辨率
+- [x] 条件融合默认采用适合高分辨率恢复的轻量机制，并给出可选增强分支
+- [x] 输出头支持 `x_0` 主预测，并说明 residual 或 color correction 辅助头是否启用
+- [x] 训练损失完整覆盖 consistency、重建、结构、感知、颜色校正等核心项
+- [x] 可选频域、边缘、measurement consistency、degradation consistency 等约束已说明适用条件
+- [x] 推理策略覆盖 1~4 步一致性蒸馏，并说明数值稳定性建议
+- [x] 工程建议覆盖显存、速度、效果三者之间的取舍与可继续轻量化方向
