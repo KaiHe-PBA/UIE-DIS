@@ -55,11 +55,12 @@ def get_epoch_sigma_max(epoch: int, cfg) -> float:
 
 
 def build_dataloaders(cfg):
+    augment_train = cfg['data'].get('augment_train', True)
     train_set = PairedUnderwaterDataset(
         data_root=cfg['data']['root'],
         split='train',
         patch_size=cfg['data']['patch_size'],
-        augment=True,
+        augment=augment_train,
     )
     val_set = PairedUnderwaterDataset(
         data_root=cfg['data']['root'],
@@ -95,6 +96,7 @@ def build_model(cfg):
         time_mlp_dim=cfg['model']['time_mlp_dim'],
         use_residual_head=cfg['model']['use_residual_head'],
         use_gate_in_film=cfg['model']['use_gate_in_film'],
+        residual_scale=cfg['model'].get('residual_scale', 0.1),
     )
 
 
@@ -171,6 +173,8 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device, cfg, ep
             msg += (
                 f" pred_mean={float(pred_stats.mean().cpu()):.4f}"
                 f" gt_mean={float(x_gt.mean().detach().cpu()):.4f}"
+                f" pred_min={float(pred_stats.amin().cpu()):.3f}"
+                f" pred_max={float(pred_stats.amax().cpu()):.3f}"
             )
             print(msg)
 

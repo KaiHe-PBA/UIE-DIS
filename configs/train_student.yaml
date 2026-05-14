@@ -11,6 +11,7 @@ model:
   time_mlp_dim: 512
   use_residual_head: true
   use_gate_in_film: true
+  residual_scale: 0.1
 
 loss:
   w_recon: 1.0

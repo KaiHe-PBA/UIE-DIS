@@ -184,6 +184,7 @@ class UWCNAFConsistencyStudent(nn.Module):
         time_mlp_dim: int = 512,
         use_residual_head: bool = True,
         use_gate_in_film: bool = True,
+        residual_scale: float = 0.1,
     ):
         super().__init__()
         dims = [base_dim * (2 ** i) for i in range(num_stages)]
@@ -227,11 +228,9 @@ class UWCNAFConsistencyStudent(nn.Module):
         self.out_norm = LayerNorm2d(dims[0])
         self.out_conv = nn.Conv2d(dims[0], out_ch, 3, 1, 1)
         self.use_residual_head = use_residual_head
+        self.residual_scale = float(residual_scale)
         if use_residual_head:
             self.res_conv = nn.Conv2d(dims[0], out_ch, 3, 1, 1)
-            self.res_scale = nn.Parameter(torch.tensor(0.1))
-        else:
-            self.out_scale = nn.Parameter(torch.tensor(0.1))
 
         # Small but non-zero init keeps identity prior while allowing backbone gradients from step 1.
         nn.init.normal_(self.out_conv.weight, mean=0.0, std=1e-3)
@@ -268,7 +267,8 @@ class UWCNAFConsistencyStudent(nn.Module):
 
         x = self.out_norm(x)
         if self.use_residual_head or return_residual:
-            residual = self.res_scale * self.res_conv(x) if self.use_residual_head else self.out_conv(x)
+            raw = self.res_conv(x) if self.use_residual_head else self.out_conv(x)
+            residual = self.residual_scale * torch.tanh(raw)
             x0 = y + residual
             out = {'x0': x0}
             out['residual'] = residual
@@ -276,6 +276,7 @@ class UWCNAFConsistencyStudent(nn.Module):
                 out['x0_from_residual'] = x0
             return out
 
-        x0 = y + self.out_scale * self.out_conv(x)
+        residual = self.residual_scale * torch.tanh(self.out_conv(x))
+        x0 = y + residual
         out = {'x0': x0}
         return out
