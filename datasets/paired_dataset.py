@@ -99,7 +99,8 @@ def pad_tensor_to_shape(tensor: torch.Tensor, target_height: int, target_width: 
     pad_w = max(target_width - width, 0)
     if pad_h == 0 and pad_w == 0:
         return tensor
-    pad_mode = 'reflect' if height > 1 and width > 1 else 'replicate'
+    can_reflect = height > 1 and width > 1 and pad_h < height and pad_w < width
+    pad_mode = 'reflect' if can_reflect else 'replicate'
     return F.pad(tensor, (0, pad_w, 0, pad_h), mode=pad_mode)
 
 

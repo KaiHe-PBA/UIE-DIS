@@ -306,7 +306,8 @@ class LightConsistencyStudent(nn.Module):
         pad_w = target_width - width
         if pad_h == 0 and pad_w == 0:
             return tensor, (height, width)
-        pad_mode = "reflect" if height > 1 and width > 1 else "replicate"
+        can_reflect = height > 1 and width > 1 and pad_h < height and pad_w < width
+        pad_mode = "reflect" if can_reflect else "replicate"
         padded = F.pad(tensor, (0, pad_w, 0, pad_h), mode=pad_mode)
         return padded, (height, width)
 
