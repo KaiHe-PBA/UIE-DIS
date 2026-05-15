@@ -39,27 +39,134 @@ def rgb_to_lab_np(image: np.ndarray) -> np.ndarray:
     return np.stack([l, a, b], axis=-1)
 
 
+def _to_numpy_image(pred: torch.Tensor) -> np.ndarray:
+    return pred.detach().cpu().clamp(0.0, 1.0).permute(1, 2, 0).numpy().astype(np.float32)
+
+
+def _trimmed_mean_std(values: np.ndarray, trim_ratio: float = 0.1) -> tuple[float, float]:
+    flat = np.sort(values.reshape(-1).astype(np.float64))
+    count = flat.size
+    if count == 0:
+        return 0.0, 0.0
+    trim = int(math.floor(trim_ratio * count))
+    if 2 * trim >= count:
+        trimmed = flat
+    else:
+        trimmed = flat[trim: count - trim]
+    return float(np.mean(trimmed)), float(np.std(trimmed))
+
+
+def _sobel_magnitude(channel: np.ndarray) -> np.ndarray:
+    if min(channel.shape) <= 1:
+        return np.zeros_like(channel, dtype=np.float32)
+    padded = np.pad(channel, ((1, 1), (1, 1)), mode="reflect")
+    gx = (
+        padded[:-2, 2:] + 2.0 * padded[1:-1, 2:] + padded[2:, 2:]
+        - padded[:-2, :-2] - 2.0 * padded[1:-1, :-2] - padded[2:, :-2]
+    )
+    gy = (
+        padded[2:, :-2] + 2.0 * padded[2:, 1:-1] + padded[2:, 2:]
+        - padded[:-2, :-2] - 2.0 * padded[:-2, 1:-1] - padded[:-2, 2:]
+    )
+    return np.sqrt(gx * gx + gy * gy + 1e-12).astype(np.float32)
+
+
+def _eme(channel: np.ndarray, window_size: int = 8, eps: float = 1e-8) -> float:
+    height, width = channel.shape
+    if height == 0 or width == 0:
+        return 0.0
+    window_size = max(1, min(window_size, height, width))
+    score = 0.0
+    block_count = 0
+    for top in range(0, height, window_size):
+        for left in range(0, width, window_size):
+            block = channel[top:min(top + window_size, height), left:min(left + window_size, width)]
+            if block.size == 0:
+                continue
+            block_max = float(np.max(block))
+            block_min = float(np.min(block))
+            if block_max <= eps or block_min <= eps or block_max <= block_min:
+                continue
+            score += math.log(block_max / block_min)
+            block_count += 1
+    if block_count == 0:
+        return 0.0
+    return float(2.0 * score / block_count)
+
+
+def _uiconm(gray: np.ndarray, window_size: int = 10, eps: float = 1e-8) -> float:
+    height, width = gray.shape
+    if height == 0 or width == 0:
+        return 0.0
+    window_size = max(1, min(window_size, height, width))
+    score = 0.0
+    block_count = 0
+    for top in range(0, height, window_size):
+        for left in range(0, width, window_size):
+            block = gray[top:min(top + window_size, height), left:min(left + window_size, width)]
+            if block.size == 0:
+                continue
+            block_max = float(np.max(block))
+            block_min = float(np.min(block))
+            contrast = (block_max - block_min) / (block_max + block_min + eps)
+            if contrast <= eps:
+                continue
+            score += contrast * math.log(contrast + eps)
+            block_count += 1
+    if block_count == 0:
+        return 0.0
+    return float(-score / block_count)
+
+
+def _uicm(image: np.ndarray) -> float:
+    r = image[..., 0]
+    g = image[..., 1]
+    b = image[..., 2]
+    rg = r - g
+    yb = 0.5 * (r + g) - b
+    mu_rg, sigma_rg = _trimmed_mean_std(rg)
+    mu_yb, sigma_yb = _trimmed_mean_std(yb)
+    return float(-0.0268 * mu_rg + 0.1586 * sigma_rg - 0.0780 * mu_yb + 0.1528 * sigma_yb)
+
+
+def _uism(image: np.ndarray) -> float:
+    weights = (0.299, 0.587, 0.114)
+    score = 0.0
+    for idx, weight in enumerate(weights):
+        channel = image[..., idx]
+        edge_map = _sobel_magnitude(channel) * channel
+        score += weight * _eme(edge_map)
+    return float(score)
+
+
 def compute_uciqe(pred: torch.Tensor) -> float:
-    image = pred.detach().cpu().permute(1, 2, 0).numpy()
+    image = _to_numpy_image(pred)
     lab = rgb_to_lab_np(image)
-    chroma = np.sqrt(lab[..., 1] ** 2 + lab[..., 2] ** 2)
-    sigma_c = float(np.std(chroma))
-    con_l = float(np.percentile(lab[..., 0], 99) - np.percentile(lab[..., 0], 1))
-    sat = float(np.mean(chroma / np.sqrt(chroma ** 2 + lab[..., 0] ** 2 + 1e-8)))
-    return 0.4680 * sigma_c + 0.2745 * con_l + 0.2576 * sat
+    luminance = np.clip(lab[..., 0] / 100.0, 0.0, 1.0)
+    a = lab[..., 1] / 127.0
+    b = lab[..., 2] / 127.0
+    chroma = np.sqrt(a * a + b * b + 1e-12)
+    mean_chroma = float(np.mean(chroma))
+    sigma_c = float(np.sqrt(np.mean(np.abs(1.0 - np.square(mean_chroma / (chroma + 1e-12))))))
+    saturation = chroma / np.sqrt(chroma * chroma + luminance * luminance + 1e-12)
+    mean_saturation = float(np.mean(saturation))
+
+    histogram, _ = np.histogram(luminance, bins=256, range=(0.0, 1.0))
+    cdf = np.cumsum(histogram).astype(np.float64)
+    cdf = cdf / max(cdf[-1], 1.0)
+    low_idx = int(np.searchsorted(cdf, 0.01))
+    high_idx = int(np.searchsorted(cdf, 0.99))
+    contrast_luminance = max((high_idx - low_idx) / 255.0, 0.0)
+    return float(0.4680 * sigma_c + 0.2745 * contrast_luminance + 0.2576 * mean_saturation)
 
 
 def compute_uiqm(pred: torch.Tensor) -> float:
-    image = pred.detach().cpu().permute(1, 2, 0).numpy()
-    r, g, b = image[..., 0], image[..., 1], image[..., 2]
-    rg = r - g
-    yb = 0.5 * (r + g) - b
-    uicm = -0.0268 * np.mean(rg) + 0.1586 * np.std(rg) - 0.0780 * np.mean(yb) + 0.1528 * np.std(yb)
-
-    gray = 0.299 * r + 0.587 * g + 0.114 * b
-    contrast = np.percentile(gray, 99) - np.percentile(gray, 1)
-    sharpness = np.mean(np.abs(np.diff(gray, axis=0))) + np.mean(np.abs(np.diff(gray, axis=1)))
-    return float(0.0282 * uicm + 0.2953 * contrast + 3.5753 * sharpness)
+    image = _to_numpy_image(pred)
+    gray = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
+    uicm = _uicm(image)
+    uism = _uism(image)
+    uiconm = _uiconm(gray)
+    return float(0.0282 * uicm + 0.2953 * uism + 3.5753 * uiconm)
 
 
 def evaluate_image_pair(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
