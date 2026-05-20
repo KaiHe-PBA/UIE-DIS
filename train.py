@@ -19,6 +19,7 @@ from utils import (
     load_checkpoint,
     move_batch_to_device,
     save_checkpoint,
+    save_image_tensor,
     seed_everything,
 )
 
@@ -36,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--val-input-dir', required=True)
     parser.add_argument('--val-target-dir', required=True)
     parser.add_argument('--save-dir', default='outputs/train')
+    parser.add_argument('--save-val-images', action='store_true', help='验证时保存增强结果图像')
+    parser.add_argument('--val-image-dir', default=None, help='验证图像保存目录，默认保存到 save-dir/val_images')
     parser.add_argument('--model-spec', default=None, help='module:Class 或 /abs/path/file.py:Class')
     parser.add_argument('--model-kwargs-json', default='{}')
     parser.add_argument('--resume', default=None)
@@ -69,8 +72,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_output_path(input_path: str, input_root: Optional[str], output_root: Path) -> Path:
+    source_path = Path(input_path)
+    if input_root:
+        root_path = Path(input_root)
+        try:
+            relative_path = source_path.relative_to(root_path)
+        except ValueError:
+            relative_path = Path(source_path.name)
+    else:
+        relative_path = Path(source_path.name)
+    return output_root / relative_path
+
+
 @torch.no_grad()
-def validate(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: torch.device) -> Dict[str, float]:
+def validate(
+    model: torch.nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    save_dir: Optional[Path] = None,
+    input_root: Optional[str] = None,
+) -> Dict[str, float]:
     model.eval()
     meters = {name: AverageMeter() for name in ['psnr', 'ssim', 'mae', 'uciqe', 'uiqm']}
     for batch in tqdm(loader, desc='Validate', leave=False):
@@ -93,6 +115,11 @@ def validate(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device
             )
             for name, value in metric_values.items():
                 meters[name].update(value, 1)
+            if save_dir is not None:
+                input_paths = batch.get('input_path')
+                input_path = input_paths[idx] if isinstance(input_paths, list) else f'val_{idx:05d}.png'
+                output_path = build_output_path(input_path, input_root, save_dir)
+                save_image_tensor(pred[idx, :, :height, :width], str(output_path))
     return {name: meter.avg for name, meter in meters.items()}
 
 
@@ -164,6 +191,7 @@ def main() -> None:
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    val_image_root = Path(args.val_image_dir) if args.val_image_dir else save_dir / 'val_images'
 
     config = vars(args).copy()
     history = []
@@ -199,7 +227,16 @@ def main() -> None:
                 loss_text = ', '.join(f'{name}={value.item():.4f}' for name, value in loss_items.items())
                 progress.set_postfix_str(loss_text)
 
-        metrics = validate(model, val_loader, device)
+        epoch_val_dir = None
+        if args.save_val_images:
+            epoch_val_dir = val_image_root / f'epoch_{epoch + 1:03d}'
+        metrics = validate(
+            model,
+            val_loader,
+            device,
+            save_dir=epoch_val_dir,
+            input_root=args.val_input_dir,
+        )
         metrics['train_loss'] = loss_meter.avg
         history.append({'epoch': epoch, **metrics})
         dump_json({'history': history, 'config': config}, str(save_dir / 'train_history.json'))

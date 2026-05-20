@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 
 import torch
 from tqdm import tqdm
@@ -14,6 +15,7 @@ from utils import (
     extract_prediction,
     load_checkpoint,
     move_batch_to_device,
+    save_image_tensor,
 )
 
 
@@ -33,7 +35,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--sigma-max', type=float, default=0.2)
     parser.add_argument('--x-t-source', default='target', choices=['target', 'input'])
     parser.add_argument('--result-json', default=None)
+    parser.add_argument('--save-image-dir', default=None, help='评估时保存增强结果图像的目录')
     return parser.parse_args()
+
+
+def build_output_path(input_path: str, input_root: str, output_root: Path) -> Path:
+    source_path = Path(input_path)
+    root_path = Path(input_root)
+    try:
+        relative_path = source_path.relative_to(root_path)
+    except ValueError:
+        relative_path = Path(source_path.name)
+    return output_root / relative_path
 
 
 def main() -> None:
@@ -56,6 +69,7 @@ def main() -> None:
     )
     loader = build_dataloader(dataset, args.batch_size, shuffle=False, num_workers=args.num_workers)
     meters = {name: AverageMeter() for name in ['psnr', 'ssim', 'mae', 'uciqe', 'uiqm']}
+    save_image_root = Path(args.save_image_dir) if args.save_image_dir else None
 
     with torch.no_grad():
         for batch in tqdm(loader, desc='Evaluate'):
@@ -78,6 +92,11 @@ def main() -> None:
                 )
                 for name, value in values.items():
                     meters[name].update(value, 1)
+                if save_image_root is not None:
+                    input_paths = batch.get('input_path')
+                    input_path = input_paths[idx] if isinstance(input_paths, list) else f'eval_{idx:05d}.png'
+                    output_path = build_output_path(input_path, args.input_dir, save_image_root)
+                    save_image_tensor(pred[idx, :, :height, :width], str(output_path))
 
     results = {name: meter.avg for name, meter in meters.items()}
     print(json.dumps(results, ensure_ascii=False, indent=2))
